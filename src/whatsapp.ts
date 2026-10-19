@@ -112,7 +112,22 @@ export class WhatsAppManager {
     };
   }
 
+  public async syncAllContacts(): Promise<{ count: number; contacts: Record<string, string> }> {
+    if (!this.sock || !this.isConnected) {
+      throw new Error('WhatsApp is not connected.');
+    }
+
+    const versions = ['critical_unblock_low', 'regular_low', 'regular_high'];
+    await this.sock.resyncAppState(versions as any, true);
+    this.loadContacts();
+    return {
+      count: Object.keys(this.contacts).length,
+      contacts: this.contacts
+    };
+  }
+
   public async resolveRecipient(recipient: string): Promise<{ jid: string; resolvedName?: string }> {
+    this.loadContacts();
     const clean = recipient.trim();
 
     // 1. If it's already an explicit JID or direct phone number

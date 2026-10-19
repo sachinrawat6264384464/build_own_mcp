@@ -169,6 +169,36 @@ server.tool(
   }
 );
 
+// Tool: sync_contacts
+server.tool(
+  'sync_contacts',
+  'Sync all saved contacts and names from your WhatsApp account into local storage.',
+  {},
+  async () => {
+    try {
+      const res = await whatsapp.syncAllContacts();
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `✅ Synced ${res.count} contacts from WhatsApp successfully!`
+          }
+        ]
+      };
+    } catch (err: any) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error syncing contacts: ${err?.message || 'Unknown error'}`
+          }
+        ],
+        isError: true
+      };
+    }
+  }
+);
+
 // Tool: check_number
 server.tool(
   'check_number',
