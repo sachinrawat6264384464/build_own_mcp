@@ -4,11 +4,18 @@ import makeWASocket, {
   Browsers,
   WASocket,
   ConnectionState,
-  WAMessage
+  WAMessage,
+  Contact
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import path from 'path';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const defaultAuthDir = path.resolve(__dirname, '..', 'auth_info_baileys');
+const defaultContactsFile = path.resolve(__dirname, '..', 'contacts.json');
 
 export interface RecentMessage {
   id: string;
@@ -22,6 +29,7 @@ export interface RecentMessage {
 
 export interface WhatsAppManagerOptions {
   authDir?: string;
+  contactsFile?: string;
   printQRInTerminal?: boolean;
   onQR?: (qr: string) => void;
   onConnected?: (user: { id: string; name?: string }) => void;
@@ -29,20 +37,16 @@ export interface WhatsAppManagerOptions {
   silent?: boolean;
 }
 
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const defaultAuthDir = path.resolve(__dirname, '..', 'auth_info_baileys');
-
 export class WhatsAppManager {
   private sock: WASocket | null = null;
   private authDir: string;
+  private contactsFile: string;
   private isConnecting = false;
   private isConnected = false;
   private userInfo: { id: string; name?: string } | null = null;
   private recentMessages: RecentMessage[] = [];
   private maxStoredMessages = 100;
+  private contacts: Record<string, string> = {}; // name -> JID or phone
   private options: WhatsAppManagerOptions;
 
   constructor(options: WhatsAppManagerOptions = {}) {
@@ -51,6 +55,101 @@ export class WhatsAppManager {
       options.authDir ||
       process.env.WHATSAPP_AUTH_DIR ||
       defaultAuthDir;
+    this.contactsFile =
+      options.contactsFile ||
+      process.env.WHATSAPP_CONTACTS_FILE ||
+      defaultContactsFile;
+
+    this.loadContacts();
+  }
+
+  private loadContacts() {
+    try {
+      if (fs.existsSync(this.contactsFile)) {
+        const raw = fs.readFileSync(this.contactsFile, 'utf-8');
+        this.contacts = JSON.parse(raw);
+      }
+    } catch (e: any) {
+      console.error('[WhatsApp] Could not load contacts.json:', e?.message);
+      this.contacts = {};
+    }
+  }
+
+  private persistContacts() {
+    try {
+      fs.writeFileSync(this.contactsFile, JSON.stringify(this.contacts, null, 2), 'utf-8');
+    } catch (e: any) {
+      console.error('[WhatsApp] Could not save contacts.json:', e?.message);
+    }
+  }
+
+  public saveContact(name: string, phoneOrJid: string): { success: boolean; name: string; jid: string } {
+    const jid = this.formatRecipient(phoneOrJid);
+    this.contacts[name.trim()] = jid;
+    this.persistContacts();
+    return { success: true, name: name.trim(), jid };
+  }
+
+  public async listContacts(): Promise<{ savedContacts: Record<string, string>; groups: Array<{ id: string; name: string }> }> {
+    const groups: Array<{ id: string; name: string }> = [];
+
+    if (this.sock && this.isConnected) {
+      try {
+        const participating = await this.sock.groupFetchAllParticipating();
+        for (const [id, meta] of Object.entries(participating)) {
+          if (meta.subject) {
+            groups.push({ id, name: meta.subject });
+          }
+        }
+      } catch (err: any) {
+        console.error('[WhatsApp] Error listing groups:', err?.message);
+      }
+    }
+
+    return {
+      savedContacts: this.contacts,
+      groups
+    };
+  }
+
+  public async resolveRecipient(recipient: string): Promise<{ jid: string; resolvedName?: string }> {
+    const clean = recipient.trim();
+
+    // 1. If it's already an explicit JID or direct phone number
+    const isPhoneNumber = /^(\+?\d{1,4}[\s-]?)?(\(?\d{2,5}\)?[\s-]?)?\d{4,12}$/.test(clean);
+    if (isPhoneNumber || clean.endsWith('@s.whatsapp.net') || clean.endsWith('@g.us')) {
+      return { jid: this.formatRecipient(clean) };
+    }
+
+    const query = clean.toLowerCase();
+
+    // 2. Search in saved contacts (exact or partial match)
+    for (const [name, jid] of Object.entries(this.contacts)) {
+      const lowerName = name.toLowerCase();
+      if (lowerName === query || lowerName.includes(query) || query.includes(lowerName)) {
+        return { jid: this.formatRecipient(jid), resolvedName: name };
+      }
+    }
+
+    // 3. Search in WhatsApp participating groups
+    if (this.sock && this.isConnected) {
+      try {
+        const groups = await this.sock.groupFetchAllParticipating();
+        for (const [id, meta] of Object.entries(groups)) {
+          const lowerSub = (meta.subject || '').toLowerCase();
+          if (lowerSub && (lowerSub === query || lowerSub.includes(query) || query.includes(lowerSub))) {
+            return { jid: id, resolvedName: meta.subject };
+          }
+        }
+      } catch (e: any) {
+        console.error('[WhatsApp] Group search error:', e?.message);
+      }
+    }
+
+    // 4. Not found
+    throw new Error(
+      `Contact or Group "${recipient}" nahi mila. Please ek baar unka phone number bata dijiye taaki main unka naam save kar sakun.`
+    );
   }
 
   public getStatus() {
@@ -59,7 +158,8 @@ export class WhatsAppManager {
       connecting: this.isConnecting,
       user: this.userInfo,
       authDir: this.authDir,
-      hasSavedCredentials: fs.existsSync(path.join(this.authDir, 'creds.json'))
+      hasSavedCredentials: fs.existsSync(path.join(this.authDir, 'creds.json')),
+      savedContactsCount: Object.keys(this.contacts).length
     };
   }
 
@@ -69,7 +169,6 @@ export class WhatsAppManager {
     }
 
     if (this.isConnecting) {
-      // Wait until connection completes or fails
       return new Promise((resolve, reject) => {
         const interval = setInterval(() => {
           if (this.isConnected && this.sock) {
@@ -85,14 +184,12 @@ export class WhatsAppManager {
 
     this.isConnecting = true;
 
-    // Ensure auth directory exists
     if (!fs.existsSync(this.authDir)) {
       fs.mkdirSync(this.authDir, { recursive: true });
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
 
-    // Create a silent pino logger
     const logger = pino({
       level: 'silent'
     });
@@ -107,10 +204,8 @@ export class WhatsAppManager {
 
     this.sock = sock;
 
-    // Handle credential updates
     sock.ev.on('creds.update', saveCreds);
 
-    // Handle connection updates
     sock.ev.on('connection.update', (update: Partial<ConnectionState>) => {
       const { connection, lastDisconnect, qr } = update;
 
@@ -158,11 +253,32 @@ export class WhatsAppManager {
       }
     });
 
-    // Track incoming & outgoing messages
-    sock.ev.on('messages.upsert', ({ messages, type }) => {
+    // Auto-record incoming & outgoing messages and contacts
+    sock.ev.on('messages.upsert', ({ messages }) => {
       for (const msg of messages) {
         this.storeMessage(msg);
       }
+    });
+
+    // Auto-save contacts when received
+    sock.ev.on('contacts.upsert', (contacts: Contact[]) => {
+      for (const c of contacts) {
+        const name = c.name || c.notify || c.verifiedName;
+        if (name && c.id) {
+          this.contacts[name.trim()] = c.id;
+        }
+      }
+      this.persistContacts();
+    });
+
+    sock.ev.on('contacts.update', (updates) => {
+      for (const u of updates) {
+        const name = u.name || u.notify || u.verifiedName;
+        if (name && u.id) {
+          this.contacts[name.trim()] = u.id;
+        }
+      }
+      this.persistContacts();
     });
 
     return sock;
@@ -178,6 +294,14 @@ export class WhatsAppManager {
       msg.message.imageMessage?.caption ||
       msg.message.videoMessage?.caption ||
       '';
+
+    // Auto-learn contact name from pushName if available
+    if (msg.pushName && chatJid.endsWith('@s.whatsapp.net')) {
+      if (!this.contacts[msg.pushName.trim()]) {
+        this.contacts[msg.pushName.trim()] = chatJid;
+        this.persistContacts();
+      }
+    }
 
     if (!text) return;
 
@@ -209,15 +333,12 @@ export class WhatsAppManager {
   public formatRecipient(recipient: string, defaultCountryCode: string = '91'): string {
     let clean = recipient.trim();
 
-    // If it's already a full JID (e.g. 1234567890@s.whatsapp.net or group @g.us)
     if (clean.endsWith('@s.whatsapp.net') || clean.endsWith('@g.us')) {
       return clean;
     }
 
-    // Strip out +, spaces, brackets, hyphens
     clean = clean.replace(/\D/g, '');
 
-    // If 10 digits (common in India), add defaultCountryCode
     if (clean.length === 10) {
       clean = defaultCountryCode + clean;
     }
@@ -227,7 +348,7 @@ export class WhatsAppManager {
 
   public async checkNumberExists(phone: string): Promise<{ exists: boolean; jid?: string }> {
     if (!this.sock || !this.isConnected) {
-      throw new Error('WhatsApp is not connected. Make sure you have authenticated via `npm run auth`');
+      throw new Error('WhatsApp is not connected.');
     }
 
     const jid = this.formatRecipient(phone);
@@ -246,16 +367,16 @@ export class WhatsAppManager {
   public async sendMessage(
     recipient: string,
     message: string
-  ): Promise<{ success: boolean; messageId: string; recipient: string }> {
+  ): Promise<{ success: boolean; messageId: string; recipient: string; resolvedName?: string }> {
     if (!this.sock || !this.isConnected) {
       throw new Error(
-        'WhatsApp is not connected yet! Please run `npm run auth` once in your terminal to pair your WhatsApp account.'
+        'WhatsApp is not connected yet! Please ensure the server is running.'
       );
     }
 
-    const targetJid = this.formatRecipient(recipient);
+    // Resolve contact name or group name to JID
+    const { jid: targetJid, resolvedName } = await this.resolveRecipient(recipient);
 
-    // Validate that number exists if it is an individual chat
     if (!targetJid.endsWith('@g.us')) {
       const check = await this.checkNumberExists(targetJid);
       if (!check.exists) {
@@ -270,7 +391,8 @@ export class WhatsAppManager {
     return {
       success: true,
       messageId: response?.key?.id || 'unknown',
-      recipient: targetJid
+      recipient: targetJid,
+      resolvedName
     };
   }
 }

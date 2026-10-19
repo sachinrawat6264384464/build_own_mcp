@@ -41,12 +41,12 @@ const server = new McpServer({
 // Tool: send_message
 server.tool(
   'send_message',
-  'Send a WhatsApp message to a phone number or group. Automatically formats Indian & international numbers.',
+  'Send a WhatsApp message. You can pass a CONTACT NAME (e.g. "Soham Sir", "Rahul"), a GROUP NAME (e.g. "MS-Builders", "AI Manthan"), or a PHONE NUMBER.',
   {
     recipient: z
       .string()
       .describe(
-        'Phone number with country code (e.g. +91 98765 43210, 919876543210, or 10-digit 9876543210 for India) or group JID'
+        'Contact name (e.g. "Soham Sir"), group name (e.g. "MS-Builders"), or phone number (+91 98765 43210 / 9876543210)'
       ),
     message: z.string().describe('The text message to send')
   },
@@ -58,7 +58,7 @@ server.tool(
           content: [
             {
               type: 'text',
-              text: `WhatsApp is not connected yet. Please run "npm run auth" once in terminal to scan the QR code and pair your WhatsApp account.`
+              text: `WhatsApp is connecting or not connected. Please make sure you have run "npm run auth" once.`
             }
           ],
           isError: true
@@ -66,11 +66,12 @@ server.tool(
       }
 
       const res = await whatsapp.sendMessage(recipient, message);
+      const targetDisplay = res.resolvedName ? `${res.resolvedName} (${res.recipient})` : res.recipient;
       return {
         content: [
           {
             type: 'text',
-            text: `✅ Message sent successfully!\nRecipient: ${res.recipient}\nMessage ID: ${res.messageId}\nMessage: "${message}"`
+            text: `✅ Message sent successfully to ${targetDisplay}!\nMessage: "${message}"`
           }
         ]
       };
@@ -81,6 +82,85 @@ server.tool(
           {
             type: 'text',
             text: `❌ Failed to send message: ${err?.message || 'Unknown error'}`
+          }
+        ],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: save_contact
+server.tool(
+  'save_contact',
+  'Save or update a contact name and phone number so you can send messages using just their name in the future.',
+  {
+    name: z.string().describe('The contact name or alias (e.g. "Soham Sir", "Rahul", "Mummy")'),
+    phone: z.string().describe('The phone number (e.g. +91 98765 43210, 9876543210)')
+  },
+  async ({ name, phone }) => {
+    try {
+      const res = whatsapp.saveContact(name, phone);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `✅ Contact "${res.name}" saved successfully with number ${res.jid}!\nAb aap direct "${res.name}" bolkar message bhej sakte hain.`
+          }
+        ]
+      };
+    } catch (err: any) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error saving contact: ${err?.message || 'Unknown error'}`
+          }
+        ],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool: list_contacts
+server.tool(
+  'list_contacts',
+  'List all saved contact aliases and participating WhatsApp groups available for name-based messaging.',
+  {},
+  async () => {
+    try {
+      const { savedContacts, groups } = await whatsapp.listContacts();
+      const contactEntries = Object.entries(savedContacts);
+
+      let text = '📱 **Saved Contacts:**\n';
+      if (contactEntries.length === 0) {
+        text += '  (No custom contact aliases saved yet. Use `save_contact` to add names)\n';
+      } else {
+        text += contactEntries.map(([n, j]) => `  • ${n}: ${j}`).join('\n') + '\n';
+      }
+
+      text += '\n👥 **Participating WhatsApp Groups:**\n';
+      if (groups.length === 0) {
+        text += '  (No groups found or still syncing)\n';
+      } else {
+        text += groups.map((g) => `  • ${g.name} (ID: ${g.id})`).join('\n');
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text
+          }
+        ]
+      };
+    } catch (err: any) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error listing contacts: ${err?.message || 'Unknown error'}`
           }
         ],
         isError: true
@@ -155,7 +235,8 @@ server.tool(
     const info = [
       `Status: ${status.connected ? '🟢 Connected' : status.connecting ? '🟡 Connecting...' : '🔴 Disconnected'}`,
       `Saved Credentials: ${status.hasSavedCredentials ? 'Yes' : 'No'}`,
-      `Auth Directory: ${status.authDir}`
+      `Auth Directory: ${status.authDir}`,
+      `Saved Contacts: ${status.savedContactsCount}`
     ];
 
     if (status.user) {
