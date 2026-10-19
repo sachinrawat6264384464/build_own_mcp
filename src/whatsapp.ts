@@ -333,7 +333,7 @@ export class WhatsAppManager {
   public formatRecipient(recipient: string, defaultCountryCode: string = '91'): string {
     let clean = recipient.trim();
 
-    if (clean.endsWith('@s.whatsapp.net') || clean.endsWith('@g.us')) {
+    if (clean.endsWith('@s.whatsapp.net') || clean.endsWith('@g.us') || clean.endsWith('@lid')) {
       return clean;
     }
 
@@ -352,7 +352,7 @@ export class WhatsAppManager {
     }
 
     const jid = this.formatRecipient(phone);
-    if (jid.endsWith('@g.us')) {
+    if (jid.endsWith('@g.us') || jid.endsWith('@lid')) {
       return { exists: true, jid };
     }
 
