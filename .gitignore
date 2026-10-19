@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build output
+dist/
+
+# WhatsApp Auth Session & Credentials (IMPORTANT: Do NOT commit!)
+auth_info_baileys/
+*.auth_info*
+sessions/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
