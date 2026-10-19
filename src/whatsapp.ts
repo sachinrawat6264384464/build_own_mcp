@@ -29,6 +29,12 @@ export interface WhatsAppManagerOptions {
   silent?: boolean;
 }
 
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const defaultAuthDir = path.resolve(__dirname, '..', 'auth_info_baileys');
+
 export class WhatsAppManager {
   private sock: WASocket | null = null;
   private authDir: string;
@@ -41,7 +47,10 @@ export class WhatsAppManager {
 
   constructor(options: WhatsAppManagerOptions = {}) {
     this.options = options;
-    this.authDir = options.authDir || path.resolve(process.cwd(), 'auth_info_baileys');
+    this.authDir =
+      options.authDir ||
+      process.env.WHATSAPP_AUTH_DIR ||
+      defaultAuthDir;
   }
 
   public getStatus() {
